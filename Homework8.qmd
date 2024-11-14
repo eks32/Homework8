@@ -1,0 +1,283 @@
+---
+title: "Homework 8"
+author: "Eric Song"
+format: html
+editor: visual
+---
+
+```{r, include=FALSE}
+library(tidyverse)
+library(lubridate)
+library(tidymodels)
+```
+
+## Reading Data
+
+I used this same exact dataset for my project so copying some code from there.
+
+```{r}
+bike_data <- read.csv("SeoulBikeData.csv", fileEncoding = "ISO-8859-1", check.names = FALSE)
+#Removing special characters and spaces for easier variables
+names(bike_data) <- gsub("\\s|\\(.*\\)", "", names(bike_data))
+names(bike_data)
+```
+
+## Checking for missing values
+
+```{r}
+bike_data |>
+  summarize(across(everything(),~sum(is.na(TRUE))))
+```
+
+None found.
+
+## Checking columns
+
+```{r}
+str(bike_data)
+```
+
+Looks like Seasons,Holiday, and Functioning day are categorical. Checking our numerical and factor levels.
+
+```{r}
+unique(bike_data$Seasons)
+unique(bike_data$Holiday)
+unique(bike_data$FunctioningDay)
+bike_data |>
+  select(where(is.numeric)) |>
+  summarize(
+    across(
+      where(is.numeric),
+      list(
+        mean = ~mean(.x),
+        sd = ~sd(.x),
+        min = ~min(.x),
+        max = ~max(.x),
+        median = ~median(.x)
+      )
+    )
+  )
+
+```
+
+Now we have factor levels and looks like nothing out of the ordinary 
+
+## Converting Date/Factors
+
+```{r}
+#Date
+bike_data <- bike_data |>
+  mutate(Date = as.Date(Date))
+
+#Factors
+bike_data <- bike_data |>
+  mutate(across(c(Seasons, Holiday, FunctioningDay), as.factor))
+```
+
+
+We showed our summary statistics on our numerical values earlier.  But showing with our subsetted functional data.  Showing our categorical counts.
+Some values are different since we subsetted functioning days.  
+
+
+```{r}
+# Subset where functioning day is true
+bike_data_functional <- bike_data |>
+  filter(FunctioningDay == "Yes")
+
+#num functional data
+bike_summary <- bike_data_functional |>
+  summarize(across(where(is.numeric),
+                   list(
+                      count = ~sum(!is.na(.x)),
+                      mean = ~mean(.x),
+                      sd = ~sd(.x),
+                      min = ~min(.x),
+                      max = ~max(.x),
+                      median = ~median(.x)
+  )))
+print(bike_summary)
+#cat data
+bike_cat_summary <- bike_data_functional |>
+  select(where(is.factor)) |>
+  pivot_longer(cols = everything(), names_to = "variable", values_to ="level") |>
+  group_by(variable, level) |>
+  summarize(count = n())
+
+print(bike_cat_summary)
+```
+
+Summarizing by groups of dates/seasons/holiday.  Showing sum of bike count, rainfall, and snowfall.  Also the mean of temperature, humidity, visibility, dew point, and uv radiation.  
+
+```{r}
+bike_data_daily <- bike_data_functional |>
+  group_by(Date, Seasons, Holiday) |>
+  summarize(
+    # Sum of bike count, rainfall, and snowfall
+    daily_bike_count = sum(RentedBikeCount),
+    total_rainfall = sum(Rainfall),
+    total_snowfall = sum(Snowfall),
+    
+    # Avg of  weather variables
+    avg_temperature = mean(Temperature),
+    avg_humidity = mean(Humidity),
+    avg_windspeed = mean(Windspeed),
+    avg_visibility = mean(Visibility),
+    avg_dewpointtemperature = mean(Dewpointtemperature),
+    avg_solarradiation = mean(SolarRadiation),
+    .groups = 'drop' 
+  )
+
+print(bike_data_daily)
+```
+
+Some summary stats on our new daily data, plots, and correlations.
+```{r}
+bike_daily_summary <- bike_data_daily |>
+  summarize(
+    across(
+      where(is.numeric),
+      list(
+        count = ~sum(!is.na(.x)),
+        mean = ~mean(.x),
+        sd = ~sd(.x),
+        min = ~min(.x),
+        max = ~max(.x),
+        median = ~median(.x)
+      )
+    )
+  )
+
+# View the summary
+print(bike_daily_summary)
+```
+
+```{r}
+#Plot  of average temperature and daily bike count with smoothing
+ggplot(bike_data_daily, aes(x = avg_temperature, y = daily_bike_count)) +
+  geom_point() +
+  geom_smooth()
+  labs(title = "Daily Bike Count vs. Average Temperature", x = "Average Temperature (°C)", y = "Daily Bike Count")
+
+bike_data_daily <- bike_data_daily |>
+  arrange(Date)
+#plot between bike count and time
+  ggplot(bike_data_daily, aes(x = Date, y = daily_bike_count)) +
+  geom_point()
+  labs(title = "Daily Bike Count vs. Average Temperature", x = "Average Temperature (°C)", y = "Daily Bike Count")
+```
+
+Interesting results with the comparison over time.  Makes sense that people would bike more in warmer weather.  
+
+Correlation between our numerical variables and rented bikes. 
+
+```{r}
+bike_data_daily |>
+  summarize(
+    across(
+      where(is.numeric) & !c(daily_bike_count),
+      ~ cor(.x, bike_data_daily$daily_bike_count)
+    )
+  )
+```
+
+Interesting that rain or snow is a weak negative correlation.  Would have expected stronger.  
+
+
+## Fold stuff
+
+```{r}
+bike_split <- initial_split(bike_data_daily, prop = 0.75, strata = Seasons)
+bike_train <- training(bike_split)
+bike_test <- testing(bike_split)
+#10-fold
+bike_10_folds <- vfold_cv(bike_train,10)
+
+```
+
+## 1st Recipe
+
+```{r}
+recipe_1 <- recipe(daily_bike_count ~ ., data = bike_train) |>
+  #changing date to different id
+  update_role(Date, new_role = "ID") |>
+  
+  step_date(Date, features = "dow") |>
+  step_mutate(
+    day_type = factor(if_else(Date_dow %in% 2:6, "Weekday", "Weekend"))
+  ) |>
+  step_rm(Date_dow) |>
+  
+  # standardizing numeric variables
+  step_normalize(all_numeric_predictors()) |>
+  # dummy variables for factors
+  step_dummy(all_nominal_predictors()) 
+recipe_1
+```
+
+## 2nd Recipe
+
+```{r}
+recipe_2 <- recipe(daily_bike_count ~ ., data = bike_train) |>
+  #changing date to different id
+  update_role(Date, new_role = "ID") |>
+  
+  step_date(Date, features = "dow") |>
+  step_mutate(
+    day_type = factor(if_else(Date_dow %in% 2:6, "Weekday", "Weekend"))
+  ) |>
+  step_rm(Date_dow) |>
+  
+  # standardizing numeric variables
+  step_normalize(all_numeric_predictors()) |>
+  # dummy variables for factors
+  step_dummy(all_nominal_predictors()) |>
+  #interactions
+  step_interact(terms = ~ starts_with("Seasons"):Holiday) |> 
+  step_interact(terms = ~ starts_with("Seasons"):Temperature) |>   
+  step_interact(terms = ~ Temperature:Rainfall) 
+recipe_2
+```
+
+## 3rd Recipe
+
+```{r}
+recipe_3 <- recipe(daily_bike_count ~ ., data = bike_train) |>
+  #changing date to different id
+  update_role(Date, new_role = "ID") |>
+  
+  step_date(Date, features = "dow") |>
+  step_mutate(
+    day_type = factor(if_else(Date_dow %in% 2:6, "Weekday", "Weekend"),levels =c("Weekday","Weekend"))) |>
+  step_rm(Date_dow) |>
+  
+  # standardizing numeric variables
+  step_normalize(all_numeric_predictors()) |>
+  # dummy variables for factors
+  step_dummy(all_nominal_predictors()) |>
+  #interactions
+  step_interact(terms = ~ starts_with("Seasons"):Holiday) |> 
+  step_interact(terms = ~ starts_with("Seasons"):Temperature) |>   
+  step_interact(terms = ~ Temperature:Rainfall) |>
+  
+  #quadratic term for numerics
+  step_poly(all_numeric_predictors(), degree = 2, options = list(raw = TRUE))
+recipe_3
+```
+
+
+
+
+```{r}
+bike_mod <- linear_reg() |>
+  set_engine("lm")
+bike_wfl <- workflow() |>
+  add_recipe(recipe_3) |>
+  add_model(bike_mod)
+#Commented out code so it renders the html
+#bike_CV_fits <- bike_wfl |>
+#  fit_resamples(bike_10_folds)
+#ike_CV_fits|>
+#  collect_metrics()
+```
+
+Writing this for completeness. Had an issue troubleshooting with the date variable and could not figure it out in time. Used prep() bake() and narrowed down to some issue with the interaction terms made and I can't figure it out.
